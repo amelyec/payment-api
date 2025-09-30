@@ -1,0 +1,23 @@
+spring:
+    application:
+        name: payment-api
+    datasource:
+        url: jdbc:postgresql://localhost:5432/payments_db
+        username: postgres
+        password: postgres
+    jpa:
+        hibernate:
+            ddl-auto: update
+        show-sql: true
+    rabbitmq:
+        host: localhost
+        port: 5672
+        username: guest
+        password: guest
+    kafka:
+        bootstrap-servers: localhost:9092
+        producer:
+            key-serializer: org.apache.kafka.common.serialization.StringSerializer
+            value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+payment:
+    duplicate-threshold-minutes: 5 # configurable threshold        
