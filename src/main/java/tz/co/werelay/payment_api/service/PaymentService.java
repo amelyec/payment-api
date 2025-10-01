@@ -23,42 +23,36 @@ import tz.co.werelay.payment_api.repository.PaymentRepository;
 public class PaymentService {
 
     private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
-    @Autowired
-    public PaymentRepository paymentRepository;
 
     @Autowired
-    public KafkaTemplate<String, Object> kafkaTemplate;
+    private PaymentRepository paymentRepository;
 
-    @Value("${payment.duplicate-threshold-minutes}")
-    public long duplicateThresholdMinutes;
+    @Autowired
+    private KafkaTemplate<String, Object> kafkaTemplate;
+
+    @Value("${payment.duplicate-threshold-minutes:5}")
+    private long duplicateThresholdMinutes;
 
     @Transactional
     public PaymentResponse process(PaymentRequest req) {
-            log.info("Start processing payment: clientRequestId={}, from={}, to={}, amount={}", req.getClientRequestId(), req.getFromAccount(), req.getToAccount(), req.getAmount());
-        // 1) Exact idempotency by clientRequestId
+        log.info("Start processing payment: {}", req);
+
+        // Idempotency check
         var existing = paymentRepository.findByClientRequestId(req.getClientRequestId());
         if (existing.isPresent()) {
             PaymentEntity e = existing.get();
-                log.info("Idempotent request detected for clientRequestId={}, returning existing transactionId={}", req.getClientRequestId(), e.getTransactionId());
-            return new PaymentResponse("SUCCESS".equals(e.getStatus()), e.getTransactionId(), null);
+            return new PaymentResponse("SUCCESS".equals(e.getStatus()), e.getTransactionId(), "IDEMPOTENT");
         }
 
-        // 2) Semantic duplicate check
-        OffsetDateTime thresholdTime = OffsetDateTime.now().minusMinutes(duplicateThresholdMinutes);
-        List<PaymentEntity> possibleDupes = paymentRepository.findRecentDuplicate(
-                req.getFromAccount(),
-                req.getToAccount(),
-                req.getAmount(),
-                thresholdTime);
-
-        if (!possibleDupes.isEmpty()) {
-            PaymentEntity e = possibleDupes.get(0);
-                log.info("Duplicate payment detected within threshold for from={}, to={}, amount={}", req.getFromAccount(), req.getToAccount(), req.getAmount());
-            return new PaymentResponse("SUCCESS".equals(e.getStatus()), e.getTransactionId(),
-                    "DUPLICATE_WITHIN_THRESHOLD");
+        // Duplicate detection
+        OffsetDateTime threshold = OffsetDateTime.now().minusMinutes(duplicateThresholdMinutes);
+        var dupes = paymentRepository.findRecentDuplicate(req.getFromAccount(), req.getToAccount(), req.getAmount(), threshold);
+        if (!dupes.isEmpty()) {
+            PaymentEntity e = dupes.get(0);
+            return new PaymentResponse(true, e.getTransactionId(), "DUPLICATE_WITHIN_THRESHOLD");
         }
 
-        // 3) Proceed with new payment
+        // Save pending
         PaymentEntity entity = new PaymentEntity();
         entity.setClientRequestId(req.getClientRequestId());
         entity.setFromAccount(req.getFromAccount());
@@ -66,28 +60,25 @@ public class PaymentService {
         entity.setAmount(req.getAmount());
         entity.setStatus("PENDING");
         entity.setCreatedAt(OffsetDateTime.now());
-
         paymentRepository.save(entity);
-            log.info("Payment saved as PENDING, clientRequestId={}", req.getClientRequestId());
 
-        // Simulate charge success
+        // Simulate success
         String txId = "tx-" + UUID.randomUUID();
         entity.setTransactionId(txId);
         entity.setStatus("SUCCESS");
         paymentRepository.save(entity);
-            log.info("Payment processed successfully, transactionId={}", txId);
 
-        // Publish to Kafka after commit
+        // After commit publish to Kafka
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                    log.info("Publishing payment_completed event to Kafka for transactionId={}", txId);
-                var event = new java.util.HashMap<String, Object>();
-                event.put("eventType", "payment_completed");
-                event.put("payload", java.util.Map.of(
-                        "clientRequestId", req.getClientRequestId(),
+                log.info("Publishing event to Kafka: transactionId={}", txId);
+                var event = java.util.Map.of(
+                        "eventType", "payment_completed",
                         "transactionId", txId,
-                        "amount", req.getAmount()));
+                        "clientRequestId", req.getClientRequestId(),
+                        "amount", req.getAmount()
+                );
                 kafkaTemplate.send("payments", req.getClientRequestId(), event);
             }
         });

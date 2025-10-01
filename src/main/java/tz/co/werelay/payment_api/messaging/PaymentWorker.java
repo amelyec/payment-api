@@ -18,9 +18,9 @@ public class PaymentWorker {
     private PaymentService paymentService;
 
     @RabbitListener(queues = RabbitConfig.PAYMENT_REQUEST_QUEUE)
-    public PaymentResponse handlePayment(PaymentRequest request) {
+    public void handlePayment(PaymentRequest request) {
             log.info("Consuming payment request from RabbitMQ: {}", request);
         // delegate to PaymentService to centralize idempotency and ledger writes
-        return paymentService.process(request);
+        paymentService.process(request);
     }
 }
